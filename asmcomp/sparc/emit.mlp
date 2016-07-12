@@ -8,6 +8,8 @@
 (*  en Automatique.  All rights reserved.  This file is distributed    *)
 (*  under the terms of the Q Public License version 1.0.               *)
 (*                                                                     *)
+(*  sparc64 support Copyright (c) 2013 Oracle.  All righs reserved.    *)
+(*                                                                     *)
 (***********************************************************************)
 
 (* $Id$ *)
@@ -33,26 +35,36 @@ let solaris = Config.system = "solaris"
 let fastcode_flag = ref true
 
 (* Layout of the stack *)
-(* Always keep the stack 8-aligned.
-   Always leave 96 bytes at the bottom of the stack *)
+(* For the 32bit ABI:
+ 
+   - Always keep the stack 8-aligned.
+   - Always leave 96 bytes at the bottom of the stack
 
+   For the 64bit ABI:
+ 
+   - Always keep the stack 16-aligned.
+   - Always leave 176 bytes at the bottom of the stack *)
+
+let stack_fsize = if !arch_version = SPARC_V9 then 176 else 96
+let stack_align = if !arch_version = SPARC_V9 then 16 else 8
 let stack_offset = ref 0
 
 let frame_size () =
   let size =
     !stack_offset +
-    4 * num_stack_slots.(0) + 8 * num_stack_slots.(1) +
-    (if !contains_calls then 4 else 0) in
-  Misc.align size 8
+    (if !arch_version = SPARC_V9 then 8 else 4) * num_stack_slots.(0) + 
+    8 * num_stack_slots.(1) +
+    (if !contains_calls then (if !arch_version = SPARC_V9 then 8 else 4) else 0) in
+  Misc.align size stack_align
 
 let slot_offset loc cl =
   match loc with
-    Incoming n -> frame_size() + n + 96
+    Incoming n -> frame_size() + n + stack_fsize
   | Local n ->
       if cl = 0
-      then !stack_offset + num_stack_slots.(1) * 8 + n * 4 + 96
-      else !stack_offset + n * 8 + 96
-  | Outgoing n -> n + 96
+      then !stack_offset + num_stack_slots.(1) * 8 + n * (if !arch_version = SPARC_V9 then 8 else 4) + stack_fsize
+      else !stack_offset + n * 8 + stack_fsize
+  | Outgoing n -> n + stack_fsize
 
 (* Return the other register in a register pair *)
 
@@ -107,10 +119,12 @@ let emit_reg r =
 
 (* Output a stack reference *)
 
+let stack_bias = if !arch_version = SPARC_V9 then 2047 else 0
+
 let emit_stack r =
   match r.loc with
     Stack s ->
-      let ofs = slot_offset s (register_class r) in `[%sp + {emit_int ofs}]`
+      let ofs = slot_offset s (register_class r) in `[%sp + {emit_int stack_bias} + {emit_int ofs}]`
   | _ -> fatal_error "Emit.emit_stack"
 
 (* Output a load *)
@@ -118,18 +132,36 @@ let emit_stack r =
 let emit_load instr addr arg dst =
   match addr with
     Ibased(s, 0) ->
-        `	sethi	%hi({emit_symbol s}), %g1\n`;
-        `	{emit_string instr}	[%g1 + %lo({emit_symbol s})], {emit_reg dst}\n`
+        if !arch_version = SPARC_V9 then begin
+	  `       setx {emit_symbol s},%g1,%g3\n`;
+	  `       {emit_string instr}	[%g3], {emit_reg dst}\n`
+	end
+	else begin
+	  `	sethi	%hi({emit_symbol s}), %g1\n`;
+	  `	{emit_string instr}	[%g1 + %lo({emit_symbol s})], {emit_reg dst}\n`
+	end
   | Ibased(s, ofs) ->
-        `	sethi	%hi({emit_symbol s} + {emit_int ofs}), %g1\n`;
-        `	{emit_string instr}	[%g1 + %lo({emit_symbol s} + {emit_int ofs})], {emit_reg dst}\n`
+    	if !arch_version = SPARC_V9 then begin
+	  `	setx	{emit_symbol s} + {emit_int ofs}, %g1, %g3\n`;
+          `	{emit_string instr}	[%g3], {emit_reg dst}\n`
+	end
+        else begin
+	  `	sethi	%hi({emit_symbol s} + {emit_int ofs}), %g1\n`;
+          `	{emit_string instr}	[%g1 + %lo({emit_symbol s} + {emit_int ofs})], {emit_reg dst}\n`
+	end
   | Iindexed ofs ->
       if is_immediate ofs then
         `	{emit_string instr}	[{emit_reg arg.(0)} + {emit_int ofs}], {emit_reg dst}\n`
       else begin
-        `	sethi	%hi({emit_int ofs}), %g1\n`;
-        `	or	%g1, %lo({emit_int ofs}), %g1\n`;
-        `	{emit_string instr}	[{emit_reg arg.(0)} + %g1], {emit_reg dst}\n`
+        if !arch_version = SPARC_V9 then begin
+	  `	setx 	{emit_int ofs}, %g1, %g3\n`;
+	  `	{emit_string instr}	[{emit_reg arg.(0)} + %g3], {emit_reg dst}\n`
+	end
+	else begin
+	  `	sethi	%hi({emit_int ofs}), %g1\n`;
+          `	or	%g1, %lo({emit_int ofs}), %g1\n`;
+	  `	{emit_string instr}	[{emit_reg arg.(0)} + %g1], {emit_reg dst}\n`
+	end
       end
 
 (* Output a store *)
@@ -137,18 +169,36 @@ let emit_load instr addr arg dst =
 let emit_store instr addr arg src =
   match addr with
     Ibased(s, 0) ->
-        `	sethi	%hi({emit_symbol s}), %g1\n`;
-        `	{emit_string instr}	{emit_reg src}, [%g1 + %lo({emit_symbol s})]\n`
+        if !arch_version = SPARC_V9 then begin
+	  `	setx	{emit_symbol s}, %g1, %g3\n`;
+          `	{emit_string instr}	{emit_reg src}, [%g3]\n`
+	end
+	else begin
+	  `	sethi	%hi({emit_symbol s}), %g1\n`;
+          `	{emit_string instr}	{emit_reg src}, [%g1 + %lo({emit_symbol s})]\n`
+	end
   | Ibased(s, ofs) ->
-        `	sethi	%hi({emit_symbol s} + {emit_int ofs}), %g1\n`;
-        `	{emit_string instr}	{emit_reg src}, [%g1 + %lo({emit_symbol s} + {emit_int ofs})]\n`
+        if !arch_version = SPARC_V9 then begin
+	  `	setx	{emit_symbol s} + {emit_int ofs}, %g1, %g2\n`;
+          `	{emit_string instr}	{emit_reg src}, [%g2]\n`
+	end
+	else begin
+	  `	sethi	%hi({emit_symbol s} + {emit_int ofs}), %g1\n`;
+          `	{emit_string instr}	{emit_reg src}, [%g1 + %lo({emit_symbol s} + {emit_int ofs})]\n`
+	end
   | Iindexed ofs ->
       if is_immediate ofs then
         `	{emit_string instr}	{emit_reg src}, [{emit_reg arg.(1)} + {emit_int ofs}]\n`
       else begin
-        `	sethi	%hi({emit_int ofs}), %g1\n`;
-        `	or	%g1, %lo({emit_int ofs}), %g1\n`;
-        `	{emit_string instr}	{emit_reg src}, [{emit_reg arg.(1)} + %g1]\n`
+        if !arch_version= SPARC_V9 then begin
+	  `	setx	{emit_int ofs}, %g3, %g1\n`;
+	  `	{emit_string instr}	{emit_reg src}, [{emit_reg arg.(1)} + %g1]\n`
+	end
+	else begin
+	  `	sethi	%hi({emit_int ofs}), %g1\n`;
+          `	or	%g1, %lo({emit_int ofs}), %g1\n`;
+	  `	{emit_string instr}	{emit_reg src}, [{emit_reg arg.(1)} + %g1]\n`
+	end
       end
 
 (* Record live pointers at call points *)
@@ -179,14 +229,20 @@ let record_frame live =
   `{emit_label lbl}:`
 
 let emit_frame fd =
-  `	.word	{emit_label fd.fd_lbl}\n`;
+  if !arch_version = SPARC_V9 then
+    `	.xword	{emit_label fd.fd_lbl}\n`
+  else
+    `	.word	{emit_label fd.fd_lbl}\n`;
   `	.half	{emit_int fd.fd_frame_size}\n`;
   `	.half	{emit_int (List.length fd.fd_live_offset)}\n`;
   List.iter
     (fun n ->
       `	.half	{emit_int n}\n`)
     fd.fd_live_offset;
-  `	.align	4\n`
+  if !arch_version = SPARC_V9 then
+    `	.align	8\n`
+  else
+    `	.align	4\n`
 
 (* Record floating-point constants *)
 
@@ -206,10 +262,17 @@ let emit_profile () =
       `	.section \".bss\"\n`;
       `{emit_label lbl}:	.skip 4\n`;
       `	.text\n`;
-      `	save	%sp,-96,%sp\n`;
-      `	sethi	%hi({emit_label lbl}),%o0\n`;
-      `	call	_mcount\n`;
-      `	or	%o0,%lo({emit_label lbl}),%o0\n`;
+      `	save	%sp,-{emit_int stack_fsize},%sp\n`;
+      if !arch_version = SPARC_V9 then begin
+	`	setx	{emit_label lbl}, %g1, %o0\n`;
+	`	call	_mcount\n`;
+	`	nop\n`  (* in delay slot *)
+      end
+      else begin
+	`	sethi	%hi({emit_label lbl}),%o0\n`;
+	`	call	_mcount\n`;
+	`	or	%o0,%lo({emit_label lbl}),%o0\n`;
+      end;
       `	restore\n`
   | _ -> ()
   end
@@ -222,10 +285,10 @@ let name_for_int_operation = function
   | Iand -> "and"
   | Ior -> "or"
   | Ixor -> "xor"
-  | Ilsl -> "sll"
-  | Ilsr -> "srl"
-  | Iasr -> "sra"
-  | Imul -> "smul"
+  | Ilsl -> if !arch_version = SPARC_V9 then "sllx" else "sll"
+  | Ilsr -> if !arch_version = SPARC_V9 then "srlx" else "srl"
+  | Iasr -> if !arch_version = SPARC_V9 then "srax" else "sra"
+  | Imul -> if !arch_version = SPARC_V9 then "mulx" else "smul"
   | _ -> Misc.fatal_error "Emit.name_for_int_operation"
 
 let name_for_float_operation = function
@@ -284,19 +347,30 @@ let rec emit_instr i dslot =
                 `	fmovs	{emit_reg(next_in_pair src)}, {emit_reg(next_in_pair dst)}\n`
               end
           | {loc = Reg rs; typ = Float}, {loc = Reg rd; typ = (Int | Addr)} ->
-              (* This happens when calling C functions and passing a float arg
-                 in %o0...%o5 *)
-              `	sub	%sp, 8, %sp\n`;
-              `	std	{emit_reg src}, [%sp + 96]\n`;
-              `	ld	[%sp + 96], {emit_reg dst}\n`;
-              `	ld	[%sp + 100], {emit_reg(next_in_pair dst)}\n`;
-              `	add	%sp, 8, %sp\n`
+	      if !arch_version = SPARC_V9 then
+	        (* This must not happen in the 64bit ABI *)
+	        fatal_error "Emit: float to int"
+              else begin
+                (* This happens when calling C functions and passing a float arg
+                   in %o0...%o5 *)
+                `	sub	%sp, 8, %sp\n`;
+                `	std	{emit_reg src}, [%sp + 96]\n`;
+                `	ld	[%sp + 96], {emit_reg dst}\n`;
+                `	ld	[%sp + 100], {emit_reg(next_in_pair dst)}\n`;
+                `	add	%sp, 8, %sp\n`
+              end
           | {loc = Reg rs; typ = (Int | Addr)}, {loc = Stack sd} ->
-              `	st	{emit_reg src}, {emit_stack dst}\n`
+	      if !arch_version = SPARC_V9 then
+	        `	stx	{emit_reg src}, {emit_stack dst}\n`
+              else
+	        `	st	{emit_reg src}, {emit_stack dst}\n`
           | {loc = Reg rs; typ = Float}, {loc = Stack sd} ->
               `	std	{emit_reg src}, {emit_stack dst}\n`
           | {loc = Stack ss; typ = (Int | Addr)}, {loc = Reg rd} ->
-              `	ld	{emit_stack src}, {emit_reg dst}\n`
+	      if !arch_version = SPARC_V9 then
+                `	ldx	{emit_stack src}, {emit_reg dst}\n`
+	      else
+	        `	ld	{emit_stack src}, {emit_reg dst}\n`
           | {loc = Stack ss; typ = Float}, {loc = Reg rd} ->
               `	ldd	{emit_stack src}, {emit_reg dst}\n`
           | (_, _) ->
@@ -306,19 +380,33 @@ let rec emit_instr i dslot =
         if is_native_immediate n then
           `	mov	{emit_nativeint n}, {emit_reg i.res.(0)}\n`
         else begin
-          `	sethi	%hi({emit_nativeint n}), %g1\n`;
-          `	or	%g1, %lo({emit_nativeint n}), {emit_reg i.res.(0)}\n`
+          if !arch_version = SPARC_V9 then
+	    `	setx	{emit_nativeint n}, %g1, {emit_reg i.res.(0)}\n`
+          else begin
+	    `	sethi	%hi({emit_nativeint n}), %g1\n`;
+            `	or	%g1, %lo({emit_nativeint n}), {emit_reg i.res.(0)}\n`
+          end
         end
     | Lop(Iconst_float s) ->
         (* On UltraSPARC, the fzero instruction could be used to set a
            floating point register pair to zero. *)
         let lbl = new_label() in
         float_constants := (lbl, s) :: !float_constants;
-        `	sethi	%hi({emit_label lbl}), %g1\n`;
-        `	ldd	[%g1 + %lo({emit_label lbl})], {emit_reg i.res.(0)}\n`
+        if !arch_version = SPARC_V9 then begin
+          `	setx	{emit_label lbl},%g1,%g3\n`;
+          `	ldd	[%g3], {emit_reg i.res.(0)}\n`
+	end
+	else begin
+          `	sethi	%hi({emit_label lbl}), %g1\n`;
+          `	ldd	[%g1 + %lo({emit_label lbl})], {emit_reg i.res.(0)}\n`
+	end
     | Lop(Iconst_symbol s) ->
-        `	sethi	%hi({emit_symbol s}), %g1\n`;
-        `	or	%g1, %lo({emit_symbol s}), {emit_reg i.res.(0)}\n`
+        if !arch_version = SPARC_V9 then
+	  `	setx	{emit_symbol s}, %g1, {emit_reg i.res.(0)}\n`
+	else begin
+	  `	sethi	%hi({emit_symbol s}), %g1\n`;
+          `	or	%g1, %lo({emit_symbol s}), {emit_reg i.res.(0)}\n`
+	end
     | Lop(Icall_ind) ->
         `{record_frame i.live}	call	{emit_reg i.arg.(0)}\n`;
         fill_delay_slot dslot
@@ -328,7 +416,10 @@ let rec emit_instr i dslot =
     | Lop(Itailcall_ind) ->
         let n = frame_size() in
         if !contains_calls then
-          `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`;
+	  if !arch_version = SPARC_V9 then
+	    `	ldx	[%sp + {emit_int stack_bias} + {emit_int(n - 8 + stack_fsize)}], %o7\n`
+	  else
+            `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`;
         `	jmp	{emit_reg i.arg.(0)}\n`;
         `	add	%sp, {emit_int n}, %sp\n` (* in delay slot *)
     | Lop(Itailcall_imm s) ->
@@ -338,16 +429,26 @@ let rec emit_instr i dslot =
             fill_delay_slot dslot
         end else begin
           if !contains_calls then
-            `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`;
+            if !arch_version = SPARC_V9 then
+  	      `	ldx	[%sp + {emit_int stack_bias} + {emit_int(n - 8 + stack_fsize)}], %o7\n`
+	    else
+              `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`;
           `	sethi	%hi({emit_symbol s}), %g1\n`;
           `	jmp	%g1 + %lo({emit_symbol s})\n`;
           `	add	%sp, {emit_int n}, %sp\n` (* in delay slot *)
         end
     | Lop(Iextcall(s, alloc)) ->
         if alloc then begin
-          `	sethi	%hi({emit_symbol s}), %g2\n`;
-          `{record_frame i.live}	call	{emit_symbol "caml_c_call"}\n`;
-          `	or	%g2, %lo({emit_symbol s}), %g2\n` (* in delay slot *)
+          if !arch_version = SPARC_V9 then begin
+            `	setx	{emit_symbol s}, %g1, %g2\n`;
+            `{record_frame i.live}	call	{emit_symbol "caml_c_call"}\n`;
+	    `	nop\n` (* in delay slot *)
+	  end
+	  else begin
+            `	sethi	%hi({emit_symbol s}), %g2\n`;
+            `{record_frame i.live}	call	{emit_symbol "caml_c_call"}\n`;
+            `	or	%g2, %lo({emit_symbol s}), %g2\n` (* in delay slot *)
+	  end
         end else begin
           `	call	{emit_symbol s}\n`;
           fill_delay_slot dslot
@@ -359,10 +460,17 @@ let rec emit_instr i dslot =
         let dest = i.res.(0) in
         begin match chunk with
           Double_u ->
-            emit_load "ld" addr i.arg dest;
-            emit_load "ld" (offset_addressing addr 4) i.arg (next_in_pair dest)
+	    if !arch_version = SPARC_V9 then
+	      emit_load "ldd" addr i.arg dest
+	    else begin
+              emit_load "ld" addr i.arg dest;
+              emit_load "ld" (offset_addressing addr 4) i.arg (next_in_pair dest)
+	    end
         | Single ->
-            emit_load "ld" addr i.arg dest;
+	    if !arch_version = SPARC_V9 then
+	      emit_load "ld" addr i.arg dest
+	    else
+              emit_load "ld" addr i.arg dest;
             `	fstod	{emit_reg dest}, {emit_reg dest}\n`
         | _ ->
             let loadinstr =
@@ -372,25 +480,29 @@ let rec emit_instr i dslot =
               | Sixteen_unsigned -> "lduh"
               | Sixteen_signed -> "ldsh"
               | Double -> "ldd"
-              | _ -> "ld" in
+              | _ -> if !arch_version = SPARC_V9 then "ldx" else "ld" in
             emit_load loadinstr addr i.arg dest
         end
     | Lop(Istore(chunk, addr)) ->
         let src = i.arg.(0) in
         begin match chunk with
           Double_u ->
-            emit_store "st" addr i.arg src;
-            emit_store "st" (offset_addressing addr 4) i.arg (next_in_pair src)
+	    if !arch_version = SPARC_V9 then
+	      emit_store "std" addr i.arg src
+	    else begin
+              emit_store "st" addr i.arg src;
+              emit_store "st" (offset_addressing addr 4) i.arg (next_in_pair src)
+	    end
         | Single ->
             `	fdtos	{emit_reg src}, %f30\n`;
-            emit_store "st" addr i.arg (phys_reg 115) (* %f30 *)
+            emit_store "st" addr i.arg (phys_reg (if !arch_version = SPARC_V9 then 131 else 115)) (* %f30 *)
         | _ ->
             let storeinstr =
               match chunk with
               | Byte_unsigned | Byte_signed -> "stb"
               | Sixteen_unsigned | Sixteen_signed -> "sth"
               | Double -> "std"
-              | _ -> "st" in
+              | _ -> if !arch_version = SPARC_V9 then "stx" else "st" in
             emit_store storeinstr addr i.arg src
         end
     | Lop(Ialloc n) ->
@@ -400,27 +512,42 @@ let rec emit_instr i dslot =
             `	sub	%l6, {emit_int n}, %l6\n`;
             `	cmp	%l6, %l7\n`
           end else begin
-            `	ld	[%l7], %g1\n`;
+	    if !arch_version = SPARC_V9 then
+	      `	ldx	[%l7], %g1\n`
+	    else
+	      `	ld	[%l7], %g1\n`;
             `	sub	%l6, {emit_int n}, %l6\n`;
             `	cmp	%l6, %g1\n`
           end;
-          `	bgeu	{emit_label lbl_cont}\n`;
-          `	add	%l6, 4, {emit_reg i.res.(0)}\n`; (* in delay slot *)
-          `{record_frame i.live}	call	{emit_symbol "caml_call_gc"}\n`;
-          `	mov	{emit_int n}, %g2\n`; (* in delay slot *)
-          `	add	%l6, 4, {emit_reg i.res.(0)}\n`;
+	  if !arch_version = SPARC_V9 then begin
+	    `	bgeu,pt	%xcc, {emit_label lbl_cont}\n`;
+            `	add	%l6, 8, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+            `{record_frame i.live}	call	{emit_symbol "caml_call_gc"}\n`;
+            `	mov	{emit_int n}, %g2\n`; (* in delay slot *)
+            `	add	%l6, 8, {emit_reg i.res.(0)}\n`
+	  end
+	  else begin
+            `	bgeu	{emit_label lbl_cont}\n`;
+            `	add	%l6, 4, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+            `{record_frame i.live}	call	{emit_symbol "caml_call_gc"}\n`;
+            `	mov	{emit_int n}, %g2\n`; (* in delay slot *)
+            `	add	%l6, 4, {emit_reg i.res.(0)}\n`
+	  end;
           `{emit_label lbl_cont}:\n`
         end else begin
           `{record_frame i.live}	call	{emit_symbol "caml_allocN"}\n`;
           `	mov	{emit_int n}, %g2\n`; (* in delay slot *)
-          `	add	%l6, 4, {emit_reg i.res.(0)}\n`
+	  if !arch_version = SPARC_V9 then
+            `	add	%l6, 8, {emit_reg i.res.(0)}\n`
+	  else
+            `	add	%l6, 4, {emit_reg i.res.(0)}\n`
         end
     | Lop(Iintop(Icomp cmp)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         if !arch_version = SPARC_V9 then begin
           let comp = name_for_int_movcc cmp in
           `	mov	0, {emit_reg i.res.(0)}\n`;
-          `	mov{emit_string comp}	%icc, 1, {emit_reg i.res.(0)}\n`
+          `	mov{emit_string comp}	%xcc, 1, {emit_reg i.res.(0)}\n`
         end
         else begin
           let comp = name_for_int_comparison cmp
@@ -433,16 +560,26 @@ let rec emit_instr i dslot =
     | Lop(Iintop Icheckbound) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         if solaris then
-          `	tleu	5\n`            (* 5 = ST_RANGE_CHECK *)
+          if !arch_version = SPARC_V9 then
+            `	tleu	%xcc,5\n`            (* 5 = ST_RANGE_CHECK *)
+          else
+            `	tleu	5\n`            (* 5 = ST_RANGE_CHECK *)
         else begin
           if !range_check_trap = 0 then range_check_trap := new_label();
-          `	bleu	{emit_label !range_check_trap}\n`;
+          if !arch_version = SPARC_V9 then
+            `	bleu	%xcc,{emit_label !range_check_trap}\n`
+          else
+            `	bleu	{emit_label !range_check_trap}\n`;
           `	nop\n`                  (* delay slot *)
         end
     | Lop(Iintop Idiv) ->
-        `	sra	{emit_reg i.arg.(0)}, 31, %g1\n`;
-        `	wr	%g1, %y\n`;
-        `	sdiv	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.res.(0)}\n`
+        if !arch_version = SPARC_V9 then
+	  `	sdivx   {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.res.(0)}\n`	
+	else begin
+          `	sra	{emit_reg i.arg.(0)}, 31, %g1\n`;
+          `	wr	%g1, %y\n`;
+          `	sdiv	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.res.(0)}\n`
+        end
     | Lop(Iintop op) ->
         let instr = name_for_int_operation op in
         `	{emit_string instr}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.res.(0)}\n`
@@ -453,32 +590,55 @@ let rec emit_instr i dslot =
         let l = Misc.log2 n in
         if n = 1 lsl l then begin
           let lbl = new_label() in
-          `	cmp	{emit_reg i.arg.(0)}, 0\n`;
-          `	bge	{emit_label lbl}\n`;
-          `	mov	{emit_reg i.arg.(0)}, %g1\n`; (* in delay slot *)
-          `	add	%g1, {emit_int (n-1)}, %g1\n`;
-          `{emit_label lbl}:\n`;
-          `	sra	%g1, {emit_int l}, {emit_reg i.res.(0)}\n`
+	  if !arch_version = SPARC_V9 then begin
+	    `	brgez,pt	{emit_reg i.arg.(0)}, {emit_label lbl}\n`;
+	    `	mov		{emit_reg i.arg.(0)}, %g1\n`; (* in delay slot *)
+	    `	add		%g1, {emit_int (n-1)}, %g1\n`;
+	    `{emit_label lbl}:\n`;
+	    `	srax		%g1, {emit_int 1}, {emit_reg i.res.(0)}\n`
+	  end
+	  else begin
+            `	cmp	{emit_reg i.arg.(0)}, 0\n`;
+            `	bge	{emit_label lbl}\n`;
+            `	mov	{emit_reg i.arg.(0)}, %g1\n`; (* in delay slot *)
+            `	add	%g1, {emit_int (n-1)}, %g1\n`;
+            `{emit_label lbl}:\n`;
+            `	sra	%g1, {emit_int l}, {emit_reg i.res.(0)}\n`
+	  end
         end else begin
-          `	sra	{emit_reg i.arg.(0)}, 31, %g1\n`;
-          `	wr	%g1, %y\n`;
-          `	sdiv	{emit_reg i.arg.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`
+          if !arch_version = SPARC_V9 then
+	    `	sdivx	{emit_reg i.arg.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`
+	  else begin
+            `	sra	{emit_reg i.arg.(0)}, 31, %g1\n`;
+            `	wr	%g1, %y\n`;
+            `	sdiv	{emit_reg i.arg.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`
+          end
         end
     | Lop(Iintop_imm(Imod, n)) ->       (* n is a power of 2 *)
         let lbl = new_label() in
-        `	tst	{emit_reg i.arg.(0)}\n`;
-        `	bge	{emit_label lbl}\n`;
-        `	andcc	{emit_reg i.arg.(0)}, {emit_int (n-1)}, {emit_reg i.res.(0)}\n`; (* in delay slot *)
-        `	be	{emit_label lbl}\n`;
-        `	nop\n`;
-        `	sub	{emit_reg i.res.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`;
-        `{emit_label lbl}:\n`
+	if !arch_version = SPARC_V9 then begin
+	  `	brgez,pt	{emit_reg i.arg.(0)}, {emit_label lbl}\n`;
+	  `	andcc		{emit_reg i.arg.(0)}, {emit_int (n-1)}, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+	  `	be		%xcc, {emit_label lbl}\n`;
+	  `	nop\n`; (* in delay slot *)
+	  `	sub	{emit_reg i.res.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`;
+	  `{emit_label lbl}:\n`
+	end
+	else begin
+          `	tst	{emit_reg i.arg.(0)}\n`;
+          `	bge	{emit_label lbl}\n`;
+          `	andcc	{emit_reg i.arg.(0)}, {emit_int (n-1)}, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+          `	be	{emit_label lbl}\n`;
+          `	nop\n`;
+          `	sub	{emit_reg i.res.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`;
+          `{emit_label lbl}:\n`
+ 	end
     | Lop(Iintop_imm(Icomp cmp, n)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_int n}\n`;
         if !arch_version = SPARC_V9 then begin
           let comp = name_for_int_movcc cmp in
           `	mov	0, {emit_reg i.res.(0)}\n`;
-          `	mov{emit_string comp}	%icc, 1, {emit_reg i.res.(0)}\n`
+          `	mov{emit_string comp}	%xcc, 1, {emit_reg i.res.(0)}\n`
         end else begin
           let comp = name_for_int_comparison cmp
           and lbl = new_label() in
@@ -490,11 +650,20 @@ let rec emit_instr i dslot =
     | Lop(Iintop_imm(Icheckbound, n)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_int n}\n`;
         if solaris then
-          `	tleu	5\n`            (* 5 = ST_RANGE_CHECK *)
+	  if !arch_version = SPARC_V9 then
+	    `	tleu	%xcc, 5\n`      (* 5 = ST_RANGE_CHECK *)
+	  else
+            `	tleu	5\n`            (* 5 = ST_RANGE_CHECK *)
         else begin
           if !range_check_trap = 0 then range_check_trap := new_label();
-          `	bleu	{emit_label !range_check_trap}\n`;
-          `	nop\n`                  (* delay slot *)
+	  if !arch_version = SPARC_V9 then begin
+	    `	bleu	%xcc, {emit_label !range_check_trap}\n`;
+	    `	nop\n`                  (* delay slot *)
+	  end
+	  else begin
+            `	bleu	{emit_label !range_check_trap}\n`;
+            `	nop\n`                  (* delay slot *)
+	  end
         end
     | Lop(Iintop_imm(op, n)) ->
         let instr = name_for_int_operation op in
@@ -508,22 +677,43 @@ let rec emit_instr i dslot =
         let instr = name_for_float_operation op in
         `	{emit_string instr}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.res.(0)}\n`
     | Lop(Ifloatofint) ->
-        `	sub	%sp, 8, %sp\n`;
-        `	st	{emit_reg i.arg.(0)}, [%sp + 96]\n`;
-        `	ld	[%sp + 96], %f30\n`;
-        `	add	%sp, 8, %sp\n`;
-        `	fitod	%f30, {emit_reg i.res.(0)}\n`
+	if !arch_version = SPARC_V9 then begin
+	  `	sub	%sp, 16, %sp\n`;
+	  `	stx	{emit_reg i.arg.(0)}, [%sp + {emit_int stack_bias} + {emit_int stack_fsize}]\n`;
+	  `	ldd	[%sp + {emit_int stack_bias} + {emit_int stack_fsize}], %f30\n`;
+	  `	add	%sp, 16, %sp\n`;
+	  `	fxtod	%f30, {emit_reg i.res.(0)}\n`
+	end
+	else begin
+          `	sub	%sp, 8, %sp\n`;
+          `	st	{emit_reg i.arg.(0)}, [%sp + 96]\n`;
+          `	ld	[%sp + 96], %f30\n`;
+          `	add	%sp, 8, %sp\n`;
+          `	fitod	%f30, {emit_reg i.res.(0)}\n`
+	end
     | Lop(Iintoffloat) ->
-        `	fdtoi	{emit_reg i.arg.(0)}, %f30\n`;
-        `	sub	%sp, 8, %sp\n`;
-        `	st	%f30, [%sp + 96]\n`;
-        `	ld	[%sp + 96], {emit_reg i.res.(0)}\n`;
-        `	add	%sp, 8, %sp\n`
+	if !arch_version = SPARC_V9 then begin
+          `	fdtox	{emit_reg i.arg.(0)}, %f30\n`;
+          `	sub	%sp, 16, %sp\n`;
+          `	std	%f30, [%sp + {emit_int stack_bias} + {emit_int stack_fsize}]\n`;
+          `	ldx	[%sp + {emit_int stack_bias} + {emit_int stack_fsize}], {emit_reg i.res.(0)}\n`;
+          `	add	%sp, 16, %sp\n`
+	end
+	else begin
+          `	fdtoi	{emit_reg i.arg.(0)}, %f30\n`;
+          `	sub	%sp, 8, %sp\n`;
+          `	st	%f30, [%sp + 96]\n`;
+          `	ld	[%sp + 96], {emit_reg i.res.(0)}\n`;
+          `	add	%sp, 8, %sp\n`
+	end
     | Lop(Ispecific sop) ->
 	assert false
     | Lreloadretaddr ->
         let n = frame_size() in
-        `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`
+	if !arch_version = SPARC_V9 then
+	  `	ldx	[%sp + {emit_int stack_bias} + {emit_int (n - 8 + stack_fsize)}], %o7\n`
+	else
+          `	ld	[%sp + {emit_int(n - 4 + 96)}], %o7\n`
     | Lreturn ->
         let n = frame_size() in
         `	retl\n`;
@@ -539,24 +729,41 @@ let rec emit_instr i dslot =
     | Lcondbranch(tst, lbl) ->
         begin match tst with
           Itruetest ->
-            `	tst	{emit_reg i.arg.(0)}\n`;
-            `	bne	{emit_label lbl}\n`
+	    if !arch_version = SPARC_V9 then
+	      `	brnz	{emit_reg i.arg.(0)}, {emit_label lbl}\n`
+	    else begin
+              `	tst	{emit_reg i.arg.(0)}\n`;
+              `	bne	{emit_label lbl}\n`
+	    end
         | Ifalsetest ->
-            `	tst	{emit_reg i.arg.(0)}\n`;
-            `	be	{emit_label lbl}\n`
+	    if !arch_version = SPARC_V9 then
+	      `	brz	{emit_reg i.arg.(0)}, {emit_label lbl}\n`
+	    else begin
+              `	tst	{emit_reg i.arg.(0)}\n`;
+              `	be	{emit_label lbl}\n`
+	    end
         | Iinttest cmp ->
             let comp = name_for_int_comparison cmp in
             `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
-            `	{emit_string comp}	{emit_label lbl}\n`
+	    if !arch_version = SPARC_V9 then
+	      `	{emit_string comp}	%xcc, {emit_label lbl}\n`
+	    else
+              `	{emit_string comp}	{emit_label lbl}\n`
         | Iinttest_imm(cmp, n) ->
             let comp = name_for_int_comparison cmp in
             `	cmp	{emit_reg i.arg.(0)}, {emit_int n}\n`;
-            `	{emit_string comp}	{emit_label lbl}\n`
+	    if !arch_version = SPARC_V9 then
+	      `	{emit_string comp}	%xcc, {emit_label lbl}\n`
+	    else
+              `	{emit_string comp}	{emit_label lbl}\n`
         | Ifloattest(cmp, neg) ->
             let comp = name_for_float_comparison cmp neg in
             `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
-            `	nop\n`;
-            `	{emit_string comp}	{emit_label lbl}\n`
+            `	nop\n`; (* XXX: Is this nop neccesary in sparc v9? *)
+	    if !arch_version = SPARC_V9 then
+	      `	{emit_string comp}	%fcc0, {emit_label lbl}\n`
+	    else
+              `	{emit_string comp}	{emit_label lbl}\n`
         | Ioddtest ->
             `	andcc	{emit_reg i.arg.(0)}, 1, %g0\n`;
             `	bne	{emit_label lbl}\n`
@@ -569,46 +776,99 @@ let rec emit_instr i dslot =
         `	cmp	{emit_reg i.arg.(0)}, 1\n`;
         begin match lbl0 with
           None -> ()
-        | Some lbl -> `	bl	{emit_label lbl}\n	nop\n`
+        | Some lbl ->
+	    if !arch_version = SPARC_V9 then
+	      `	bl	%xcc, {emit_label lbl}\n	nop\n`
+	    else
+	      `	bl	{emit_label lbl}\n	nop\n`
         end;
         begin match lbl1 with
           None -> ()
-        | Some lbl -> `	be	{emit_label lbl}\n	nop\n`
+        | Some lbl ->
+	    if !arch_version = SPARC_V9 then
+	      `	be	%xcc, {emit_label lbl}\n	nop\n`
+	    else
+	      `	be	{emit_label lbl}\n	nop\n`
         end;
         begin match lbl2 with
           None -> ()
-        | Some lbl -> `	bg	{emit_label lbl}\n	nop\n`
+        | Some lbl -> 
+	    if !arch_version = SPARC_V9 then
+	      `	bg	%xcc, {emit_label lbl}\n	nop\n`
+	    else
+	      `	bg	{emit_label lbl}\n	nop\n`
         end
     | Lswitch jumptbl ->
         let lbl_jumptbl = new_label() in
-        `	sethi	%hi({emit_label lbl_jumptbl}), %g1\n`;
-        `	or	%g1, %lo({emit_label lbl_jumptbl}), %g1\n`;
-        `	sll	{emit_reg i.arg.(0)}, 2, %g2\n`;
-        `	ld	[%g1 + %g2], %g1\n`;
-        `	jmp	%g1\n`;         (* poor scheduling *)
-        `	nop\n`;
+	if !arch_version = SPARC_V9 then begin
+	  `	setx	{emit_label lbl_jumptbl}, %g2, %g1\n`;
+	  `     sll	{emit_reg i.arg.(0)}, 3, %g2\n`;
+	  `	ldx	[%g1 + %g2], %g1\n`;
+	  `	jmp	%g1\n`;         (* poor scheduling *)
+	  `	nop\n`                  (* in delay slot *)
+
+	end
+	else begin
+          `	sethi	%hi({emit_label lbl_jumptbl}), %g1\n`;
+          `	or	%g1, %lo({emit_label lbl_jumptbl}), %g1\n`;
+          `	sll	{emit_reg i.arg.(0)}, 2, %g2\n`;
+          `	ld	[%g1 + %g2], %g1\n`;
+          `	jmp	%g1\n`;         (* poor scheduling *)
+          `	nop\n`
+	end;
+	if !arch_version = SPARC_V9 then
+	  `	.align 8\n`;
         `{emit_label lbl_jumptbl}:`;
         for i = 0 to Array.length jumptbl - 1 do
-          `	.word	{emit_label jumptbl.(i)}\n`
-        done
+	  if !arch_version = SPARC_V9 then
+	    `	.xword	{emit_label jumptbl.(i)}\n`
+	  else
+            `	.word	{emit_label jumptbl.(i)}\n`
+        done;
+	if !arch_version = SPARC_V9 then
+	  `	.align 4\n`
     | Lsetuptrap lbl ->
         `	call	{emit_label lbl}\n`;
-        `	sub	%sp, 8, %sp\n`  (* in delay slot *)
+	if !arch_version = SPARC_V9 then
+	  `	sub	%sp, 16, %sp\n` (* in delay slot *)
+	else
+          `	sub	%sp, 8, %sp\n`  (* in delay slot *)
     | Lpushtrap ->
-        stack_offset := !stack_offset + 8;
-        `	st	%o7, [%sp + 96]\n`;
-        `	st	%l5, [%sp + 100]\n`;
+	stack_offset := !stack_offset + (if !arch_version = SPARC_V9 then 16 else 8);
+	if !arch_version = SPARC_V9 then begin
+	  `	stx	%o7, [%sp + {emit_int stack_bias} + {emit_int stack_fsize}]\n`;
+	  `	stx	%l5, [%sp + {emit_int stack_bias} + {emit_int (stack_fsize + 8)}]\n`
+	end
+	else begin
+          `	st	%o7, [%sp + 96]\n`;
+          `	st	%l5, [%sp + 100]\n`
+	end;
         `	mov	%sp, %l5\n`
     | Lpoptrap ->
-        `	ld	[%sp + 100], %l5\n`;
-        `	add	%sp, 8, %sp\n`;
-        stack_offset := !stack_offset - 8
+	if !arch_version = SPARC_V9 then begin
+	  `	ldx	[%sp + {emit_int stack_bias} + {emit_int (stack_fsize + 8)}], %l5\n`;
+	  `	add	%sp, 16, %sp\n`
+	end
+	else begin
+          `	ld	[%sp + 100], %l5\n`;
+          `	add	%sp, 8, %sp\n`
+	end;
+	stack_offset := !stack_offset - (if !arch_version = SPARC_V9 then 16 else 8)
     | Lraise ->
-        `	ld	[%l5 + 96], %g1\n`;
-        `	mov	%l5, %sp\n`;
-        `	ld	[%sp + 100], %l5\n`;
-        `	jmp	%g1 + 8\n`;
-        `	add	%sp, 8, %sp\n`
+	if !arch_version = SPARC_V9 then begin
+	  `	ldx	[%l5 + {emit_int stack_bias} + {emit_int stack_fsize}], %g1\n`;
+	  `	mov	%l5, %sp\n`;
+	  `	ldx	[%sp + {emit_int stack_bias} + {emit_int (stack_fsize + 8)}], %l5\n`;
+	  `	jmp	%g1 + 8\n`;
+	  `	add	%sp, 16, %sp\n`
+	end
+	else begin
+          `	ld	[%l5 + 96], %g1\n`;
+          `	mov	%l5, %sp\n`;
+          `	ld	[%sp + 100], %l5\n`;
+          `	jmp	%g1 + 8\n`;
+          `	add	%sp, 8, %sp\n`
+	end
 
 and fill_delay_slot = function
     None -> `	nop\n`
@@ -685,7 +945,10 @@ let fundecl fundecl =
   stack_offset := 0;
   float_constants := [];
   `	.text\n`;
-  `	.align	4\n`;
+  if !arch_version = SPARC_V9 then
+    `	.align	8\n`
+  else
+    `	.align	4\n`;
   `	.global	{emit_symbol fundecl.fun_name}\n`;
   if Config.system = "solaris" then
     `	.type	{emit_symbol fundecl.fun_name},#function\n`;
@@ -695,7 +958,10 @@ let fundecl fundecl =
   if n > 0 then
     `	sub	%sp, {emit_int n}, %sp\n`;
   if !contains_calls then
-    `	st	%o7, [%sp + {emit_int(n - 4 + 96)}]\n`;
+    if !arch_version = SPARC_V9 then
+      `	stx	%o7, [%sp + {emit_int stack_bias} + {emit_int (n - 8 + stack_fsize)}]\n`
+    else
+      `	st	%o7, [%sp + {emit_int(n - 4 + 96)}]\n`;
   `{emit_label !tailrec_entry_point}:\n`;
   emit_all fundecl.fun_body;
   if !range_check_trap > 0 then begin
@@ -722,15 +988,24 @@ let emit_item = function
   | Cint32 n ->
       `	.word	{emit_nativeint n}\n`
   | Cint n ->
-      `	.word	{emit_nativeint n}\n`
+      if !arch_version = SPARC_V9 then
+	`	.xword	{emit_nativeint n}\n`
+      else
+	`	.word	{emit_nativeint n}\n`
   | Csingle f ->
-      emit_float32_directive ".word" f
+      emit_float32_directive ".word" f (* XXX *)
   | Cdouble f ->
-      emit_float64_split_directive ".word" f
+      emit_float64_split_directive ".word" f (* XXX *)
   | Csymbol_address s ->
-      `	.word	{emit_symbol s}\n`
+      if !arch_version = SPARC_V9 then
+	`	.xword	{emit_symbol s}\n`
+      else
+	`	.word	{emit_symbol s}\n`
   | Clabel_address lbl ->
-      `	.word	{emit_label (lbl + 100000)}\n`
+      if !arch_version = SPARC_V9 then
+	`	.xword	{emit_label (lbl + 100000)}\n`
+      else
+	`	.word	{emit_label (lbl + 100000)}\n`
   | Cstring s ->
       emit_string_directive "	.ascii	" s
   | Cskip n ->
@@ -748,6 +1023,10 @@ let begin_assembly() =
   let lbl_begin = Compilenv.make_symbol (Some "data_begin") in
   `	.data\n`;
   `	.global	{emit_symbol lbl_begin}\n`;
+  if !arch_version = SPARC_V9 then begin
+    `	.register %g2, #scratch\n`;
+    `	.register %g3, #scratch\n`
+  end;
   `{emit_symbol lbl_begin}:\n`;
   let lbl_begin = Compilenv.make_symbol (Some "code_begin") in
   `	.text\n`;
@@ -768,9 +1047,13 @@ let end_assembly() =
   rodata ();
   `	.global	{emit_symbol lbl}\n`;
   if Config.system = "solaris" then
-    `	.type   {emit_symbol lbl},#object\n`;
+    `.type   {emit_symbol lbl},#object\n`;
+  `	.align 8\n`;
   `{emit_symbol lbl}:\n`;
-  `	.word	{emit_int (List.length !frame_descriptors)}\n`;
+  if !arch_version = SPARC_V9 then
+    `	.xword	{emit_int (List.length !frame_descriptors)}\n`
+  else
+    `	.word	{emit_int (List.length !frame_descriptors)}\n`;
   List.iter emit_frame !frame_descriptors;
   emit_size lbl;
   frame_descriptors := []

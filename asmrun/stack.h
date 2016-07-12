@@ -28,8 +28,14 @@
 #endif
 
 #ifdef TARGET_sparc
-#define Saved_return_address(sp) *((intnat *)((sp) + 92))
-#define Callback_link(sp) ((struct caml_context *)((sp) + 104))
+# if defined(__arch64__)
+/* Note that SP already has the stack bias added to it.  */
+#  define Saved_return_address(sp) *((intnat *)((sp) + 168))
+#  define Callback_link(sp) ((struct caml_context *)((sp) + 192))
+# else
+#  define Saved_return_address(sp) *((intnat *)((sp) + 92))
+#  define Callback_link(sp) ((struct caml_context *)((sp) + 104))
+# endif
 #endif
 
 #ifdef TARGET_i386

@@ -464,7 +464,7 @@ esac
 
 if $int64_native; then
   case "$host" in
-    sparc*-*-*|hppa*-*-*)
+    hppa*-*-*)
       if test $2 = 8; then
         echo "64-bit integers can be word-aligned."
         echo "#undef ARCH_ALIGN_INT64" >> m.h
@@ -472,6 +472,9 @@ if $int64_native; then
         echo "64-bit integers must be doubleword-aligned."
         echo "#define ARCH_ALIGN_INT64" >> m.h
       fi;;
+    sparc*-*-*)
+        echo "64-bit integers must be doubleword-aligned."
+        echo "#define ARCH_ALIGN_INT64" >> m.h;;
     *)
       sh ./runtest int64align.c
       case $? in
@@ -668,7 +671,7 @@ esac
 
 if $arch64; then
   case "$arch,$model" in
-    sparc,default|mips,default|hppa,default|power,ppc)
+    mips,default|hppa,default|power,ppc)
       arch=none; model=default; system=unknown;;
   esac
 fi
