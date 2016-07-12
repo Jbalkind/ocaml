@@ -8,6 +8,8 @@
 (*  en Automatique.  All rights reserved.  This file is distributed    *)
 (*  under the terms of the Q Public License version 1.0.               *)
 (*                                                                     *)
+(*  sparc64 support Copyright (c) 2013 Oracle.                         *)
+(*                                                                     *)
 (***********************************************************************)
 
 (* Specific operations for the Sparc processor *)
@@ -20,7 +22,7 @@ open Format
    Sun calls 32 bit V9 "V8+". *)
 type arch_version = SPARC_V7 | SPARC_V8 | SPARC_V9
 
-let arch_version = ref SPARC_V7
+let arch_version = ref SPARC_V9
 
 let command_line_options =
   [ "-march=v8", Arg.Unit (fun () -> arch_version := SPARC_V8),
@@ -40,8 +42,8 @@ type addressing_mode =
 
 let big_endian = true
 
-let size_addr = 4
-let size_int = 4
+let size_addr = if !arch_version = SPARC_V9 then 8 else 4
+let size_int =  if !arch_version = SPARC_V9 then 8 else 4
 let size_float = 8
 
 let allow_unaligned_access = false
