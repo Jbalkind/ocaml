@@ -633,7 +633,7 @@ case "$target" in
     fi;;
   sparc*-*-*)
     inf "64-bit integers must be doubleword-aligned."
-    echo "#define ARCH_ALIGN_INT64" >> m.h
+    echo "#define ARCH_ALIGN_INT64" >> m.h;;
   *-*-mingw*) true;; # Nothing is in config/m-nt.h so don't add anything.
   *)
     sh ./runtest int64align.c
