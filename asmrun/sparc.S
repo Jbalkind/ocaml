@@ -320,7 +320,7 @@ L100:   add     %sp, BIAS + FRAME_SIZE + FREGS_SIZE, %g1
         sub     Alloc_ptr, %g2, Alloc_ptr
         cmp     Alloc_ptr, Alloc_limit
 #endif
-        Bi(lu, L100)               /* If not, call GC again */
+        Bi(lu, L100)                /* If not, call GC again */
         nop
     /* Return to caller */
         Load(caml_last_return_address, %o7)

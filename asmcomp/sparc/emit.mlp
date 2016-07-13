@@ -566,11 +566,14 @@ let rec emit_instr i dslot =
             `  tleu    5\n`            (* 5 = ST_RANGE_CHECK *)
         else begin
           if !range_check_trap = 0 then range_check_trap := new_label();
-          if !arch_version = SPARC_V9 then
+          if !arch_version = SPARC_V9 then begin
             `  bleu    %xcc,{emit_label !range_check_trap}\n`
-          else
+          `	nop\n`                  (* delay slot *)
+          end
+          else begin
             `  bleu    {emit_label !range_check_trap}\n`;
           `	nop\n`                  (* delay slot *)
+          end
         end
     | Lop(Iintop Idiv) ->
         if !arch_version = SPARC_V9 then
@@ -589,6 +592,53 @@ let rec emit_instr i dslot =
     | Lop(Iintop_imm(Ilsl, 1)) ->
         (* UltraSPARC has two add units but only one shifter. *)
         `	add	{emit_reg i.arg.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.res.(0)}\n`
+    | Lop(Iintop_imm(Idiv, n)) ->
+        let l = Misc.log2 n in
+        if n = 1 lsl l then begin
+          let lbl = new_label() in
+	  if !arch_version = SPARC_V9 then begin
+	    `	brgez,pt	{emit_reg i.arg.(0)}, {emit_label lbl}\n`;
+	    `	mov		{emit_reg i.arg.(0)}, %g1\n`; (* in delay slot *)
+	    `	add		%g1, {emit_int (n-1)}, %g1\n`;
+	    `{emit_label lbl}:\n`;
+	    `	srax		%g1, {emit_int 1}, {emit_reg i.res.(0)}\n`
+	  end
+	  else begin
+            `	cmp	{emit_reg i.arg.(0)}, 0\n`;
+            `	bge	{emit_label lbl}\n`;
+            `	mov	{emit_reg i.arg.(0)}, %g1\n`; (* in delay slot *)
+            `	add	%g1, {emit_int (n-1)}, %g1\n`;
+            `{emit_label lbl}:\n`;
+            `	sra	%g1, {emit_int l}, {emit_reg i.res.(0)}\n`
+	  end
+        end else begin
+          if !arch_version = SPARC_V9 then
+	    `	sdivx	{emit_reg i.arg.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`
+	  else begin
+            `	sra	{emit_reg i.arg.(0)}, 31, %g1\n`;
+            `	wr	%g1, %y\n`;
+            `	sdiv	{emit_reg i.arg.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`
+          end
+        end
+    | Lop(Iintop_imm(Imod, n)) ->       (* n is a power of 2 *)
+        let lbl = new_label() in
+	if !arch_version = SPARC_V9 then begin
+	  `	brgez,pt	{emit_reg i.arg.(0)}, {emit_label lbl}\n`;
+	  `	andcc		{emit_reg i.arg.(0)}, {emit_int (n-1)}, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+	  `	be		%xcc, {emit_label lbl}\n`;
+	  `	nop\n`; (* in delay slot *)
+	  `	sub	{emit_reg i.res.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`;
+	  `{emit_label lbl}:\n`
+	end
+	else begin
+          `	tst	{emit_reg i.arg.(0)}\n`;
+          `	bge	{emit_label lbl}\n`;
+          `	andcc	{emit_reg i.arg.(0)}, {emit_int (n-1)}, {emit_reg i.res.(0)}\n`; (* in delay slot *)
+          `	be	{emit_label lbl}\n`;
+          `	nop\n`;
+          `	sub	{emit_reg i.res.(0)}, {emit_int n}, {emit_reg i.res.(0)}\n`;
+          `{emit_label lbl}:\n`
+ 	end
     | Lop(Iintop_imm(Icomp cmp, n)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_int n}\n`;
         if !arch_version = SPARC_V9 then begin

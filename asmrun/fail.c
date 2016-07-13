@@ -66,6 +66,7 @@ void caml_raise(value v)
 # else
 #  define STACK_BIAS 0
 # endif
+
   while (caml_local_roots != NULL &&
          (char *) caml_local_roots PUSHED_AFTER caml_exception_pointer + STACK_BIAS) {
     caml_local_roots = caml_local_roots->next;
