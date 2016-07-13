@@ -566,14 +566,11 @@ let rec emit_instr i dslot =
             `  tleu    5\n`            (* 5 = ST_RANGE_CHECK *)
         else begin
           if !range_check_trap = 0 then range_check_trap := new_label();
-          if !arch_version = SPARC_V9 then begin
+          if !arch_version = SPARC_V9 then
             `  bleu    %xcc,{emit_label !range_check_trap}\n`
-          `	nop\n`                  (* delay slot *)
-          end
-          else begin
+          else
             `  bleu    {emit_label !range_check_trap}\n`;
           `	nop\n`                  (* delay slot *)
-          end
         end
     | Lop(Iintop Idiv) ->
         if !arch_version = SPARC_V9 then
